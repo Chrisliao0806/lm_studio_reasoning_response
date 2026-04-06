@@ -1,0 +1,7 @@
+httpx==0.28.1
+langchain==1.2.0
+langchain-core==1.2.6
+langchain-openai==1.1.6
+openai==2.14.0
+pydantic==2.12.5
+requests==2.32.5
