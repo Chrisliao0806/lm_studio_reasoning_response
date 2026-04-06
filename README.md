@@ -1,6 +1,6 @@
 # lm_studio_reasoning_response
 
-A universal LangChain-compatible wrapper that properly surfaces `reasoning_content` (thinking tokens) from reasoning LLMs.  Supports both **OpenAI-compatible APIs** (DeepSeek-Reasoner, QwQ, vLLM, …) and the **LM Studio native API** (`/api/v1/chat`).
+A universal LangChain-compatible wrapper that properly surfaces `reasoning_content` (thinking tokens) from reasoning LLMs via the **OpenAI-compatible API** (`/v1/chat/completions`).  Works with DeepSeek-Reasoner, QwQ, vLLM, LM Studio, and any API that returns reasoning tokens in the delta.
 
 ---
 
@@ -13,8 +13,8 @@ A universal LangChain-compatible wrapper that properly surfaces `reasoning_conte
 - [Requirements](#requirements)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
-  - [LM Studio native mode](#lm-studio-native-mode)
-  - [OpenAI-compatible mode](#openai-compatible-mode)
+  - [LM Studio / vLLM (Gemma with thinking)](#lm-studio--vllm-gemma-with-thinking)
+  - [DeepSeek-Reasoner](#deepseek-reasoner)
 - [API Reference — ChatOpenAIReasoner](#api-reference--chatopenaireasononer)
   - [Constructor parameters](#constructor-parameters)
   - [Key method: set_abort_event](#key-method-set_abort_event)
@@ -32,10 +32,10 @@ Modern reasoning LLMs (DeepSeek-R1, QwQ, Gemma with thinking, …) emit two sepa
 
 | Stream | Field | Description |
 |---|---|---|
-| Thinking | `reasoning_content` | The model's internal chain-of-thought |
+| Thinking | `reasoning_content` / `reasoning` | The model's internal chain-of-thought |
 | Answer | `content` | The final response |
 
-The standard LangChain `ChatOpenAI` silently **drops** `reasoning_content` before it reaches user code because Pydantic's `model_dump()` excludes `model_extra` fields.  This library fixes that.
+The standard LangChain `ChatOpenAI` silently **drops** these fields before they reach user code because Pydantic's `model_dump()` excludes `model_extra` fields.  This library fixes that.
 
 ---
 
@@ -50,10 +50,10 @@ The standard LangChain `ChatOpenAI` silently **drops** `reasoning_content` befor
 ## Features
 
 - Drop-in replacement for `ChatOpenAI` — all LangChain usage patterns work unchanged
-- Captures `reasoning_content` / thinking tokens in both **streaming** and **non-streaming** modes
-- **LM Studio native mode** (`lmstudio_native=True`) calls `/api/v1/chat`, which natively exposes reasoning via SSE `reasoning.delta` / `message.delta` events
-- **OpenAI-compatible mode** (default) works with DeepSeek-Reasoner, QwQ, vLLM, and any API returning `reasoning_content` in the delta
-- Configurable reasoning budget for LM Studio: `"off"` | `"low"` | `"medium"` | `"high"` | `"on"`
+- Captures thinking tokens in both **streaming** and **non-streaming** modes
+- Supports both `reasoning_content` (DeepSeek) and `reasoning` (vLLM Gemma-4) field names
+- **OpenAI-compatible mode** works with LM Studio, DeepSeek-Reasoner, QwQ, vLLM, and any API returning reasoning tokens in the delta
+- Pass model-specific thinking settings via `extra_body` (e.g. `{"chat_template_kwargs": {"enable_thinking": True}}` for vLLM/Gemma-4)
 - Async support (`astream`, `ainvoke`, `abatch`)
 - Cooperative cancellation via `threading.Event`
 
@@ -106,34 +106,47 @@ pip install -r requirements.txt
 
 ## Quick Start
 
-### LM Studio native mode
+### LM Studio / vLLM (Gemma with thinking)
 
-Use this mode when running a reasoning model in **LM Studio**.  
-The `/v1/chat/completions` shim in LM Studio does **not** expose reasoning tokens; you must use the native `/api/v1/chat` endpoint.
+Use this when running a reasoning model via LM Studio's OpenAI-compatible endpoint or a vLLM server.  Pass `extra_body` to enable the model's thinking mode.
 
 ```python
+from langchain_core.prompts import ChatPromptTemplate
 from chatopenai_reasoner import ChatOpenAIReasoner
 
 llm = ChatOpenAIReasoner(
-    model="google/gemma-4-e4b",       # model ID as shown in LM Studio
-    openai_api_key="lm-studio",        # any non-empty string
-    openai_api_base="http://localhost:1234",
-    lmstudio_native=True,
-    lmstudio_reasoning="on",           # "off" | "on"
+    model="google/gemma-4-e4b",
+    openai_api_key="lm-studio",            # any non-empty string for LM Studio
+    openai_api_base="http://localhost:1234/v1",
+    streaming=True,
     stream_reasoning=True,
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
 )
 
-for chunk in llm.stream("Write a sorting algorithm"):
+prompt = ChatPromptTemplate.from_messages([
+    ("system", "You are a helpful AI assistant."),
+    ("user", "{input}")
+])
+messages = prompt.format_messages(input="What is 2+2? Think step by step.")
+
+in_thinking = False
+for chunk in llm.stream(messages):
     rc = chunk.additional_kwargs.get("reasoning_content", "")
     if rc:
-        print(rc, end="", flush=True)   # thinking tokens
-    else:
-        print(chunk.content, end="", flush=True)  # answer tokens
+        if not in_thinking:
+            print("\n=== THINKING ===", flush=True)
+            in_thinking = True
+        print(rc, end="", flush=True)
+    if chunk.content:
+        if in_thinking:
+            print("\n=== ANSWER ===", flush=True)
+            in_thinking = False
+        print(chunk.content, end="", flush=True)
 ```
 
-### OpenAI-compatible mode
+### DeepSeek-Reasoner / QwQ
 
-For DeepSeek-Reasoner, QwQ, vLLM, or any API that returns `reasoning_content` in the standard `/v1/chat/completions` response:
+For DeepSeek-Reasoner, QwQ, or any API that returns `reasoning_content` in the standard `/v1/chat/completions` response:
 
 ```python
 from chatopenai_reasoner import ChatOpenAIReasoner
@@ -168,9 +181,9 @@ from chatopenai_reasoner import ChatOpenAIReasoner
 llm = ChatOpenAIReasoner(
     model="google/gemma-4-e4b",
     openai_api_key="lm-studio",
-    openai_api_base="http://localhost:1234",
-    lmstudio_native=True,
-    lmstudio_reasoning="on",
+    openai_api_base="http://127.0.0.1:1234/v1",
+    stream_reasoning=True,
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
 )
 
 async def main():
@@ -196,10 +209,10 @@ asyncio.run(main())
 |---|---|---|---|
 | `model` | `str` | — | Model name / ID |
 | `openai_api_key` | `str` | — | API key (`"lm-studio"` for LM Studio) |
-| `openai_api_base` | `str` | — | Base URL of the API server |
-| `stream_reasoning` | `bool` | `True` | Whether to inject `reasoning_content` into `additional_kwargs` during streaming |
-| `lmstudio_native` | `bool` | `False` | Enable LM Studio native `/api/v1/chat` mode |
-| `lmstudio_reasoning` | `str` | `"on"` | Reasoning budget: `"off"` \| `"on"` |
+| `openai_api_base` | `str` | — | Base URL of the API server (e.g. `http://127.0.0.1:1234/v1`) |
+| `stream_reasoning` | `bool` | `True` | Whether to inject reasoning tokens into `additional_kwargs` during streaming |
+| `streaming` | `bool` | `False` | Enable streaming mode |
+| `extra_body` | `dict` | `None` | Extra fields forwarded to the API (e.g. `{"chat_template_kwargs": {"enable_thinking": True}}`) |
 | `temperature` | `float` | `0.7` | Sampling temperature |
 | `max_tokens` | `int` | `None` | Max output tokens |
 
@@ -239,8 +252,8 @@ abort = threading.Event()
 llm = ChatOpenAIReasoner(
     model="google/gemma-4-e4b",
     openai_api_key="lm-studio",
-    openai_api_base="http://localhost:1234",
-    lmstudio_native=True,
+    openai_api_base="http://127.0.0.1:1234/v1",
+    extra_body={"chat_template_kwargs": {"enable_thinking": True}},
 )
 llm.set_abort_event(abort)
 
@@ -262,14 +275,14 @@ t.join()
 
 ## Supported backends
 
-| Backend | Mode | Notes |
-|---|---|---|
-| LM Studio | `lmstudio_native=True` | Requires LM Studio ≥ 0.3.x with a reasoning model loaded |
-| DeepSeek-Reasoner | default | `openai_api_base="https://api.deepseek.com"` |
-| QwQ (Alibaba Cloud) | default | `openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1"` |
-| vLLM | default | Point `openai_api_base` at your vLLM server |
-| Ollama | default | Point `openai_api_base` at `http://localhost:11434/v1` |
-| Any OpenAI-compatible API | default | As long as `reasoning_content` is in the delta |
+| Backend | Notes |
+|---|---|
+| LM Studio | `openai_api_base="http://127.0.0.1:1234/v1"`, enable thinking via `extra_body` |
+| DeepSeek-Reasoner | `openai_api_base="https://api.deepseek.com"` |
+| QwQ (Alibaba Cloud) | `openai_api_base="https://dashscope.aliyuncs.com/compatible-mode/v1"` |
+| vLLM | Point `openai_api_base` at your vLLM server |
+| Ollama | `openai_api_base="http://localhost:11434/v1"` |
+| Any OpenAI-compatible API | As long as `reasoning_content` or `reasoning` is in the delta |
 
 ---
 
@@ -278,8 +291,8 @@ t.join()
 1. Download and launch [LM Studio](https://lmstudio.ai/)
 2. Load a reasoning-capable model (e.g. Gemma 4, QwQ, DeepSeek-R1)
 3. Start the local server (default port: **1234**)
-4. Set `lmstudio_native=True` in `ChatOpenAIReasoner` — the standard `/v1/chat/completions` endpoint does **not** expose reasoning tokens
-5. Control reasoning budget with `lmstudio_reasoning`: `"off"` | `"on"`
+4. Use `openai_api_base="http://127.0.0.1:1234/v1"` — the standard OpenAI-compatible endpoint
+5. Enable thinking tokens by passing `extra_body={"chat_template_kwargs": {"enable_thinking": True}}` for models that support it (e.g. Gemma-4 via vLLM/LM Studio)
 
 ---
 
@@ -294,8 +307,8 @@ A: Yes. `ChatOpenAIReasoner` is a full `ChatOpenAI` subclass and works anywhere 
 **Q: What happens if the model doesn't return `reasoning_content`?**  
 A: `additional_kwargs` will simply not contain the key.  Normal `content` streaming is unaffected.
 
-**Q: Does `lmstudio_native=True` work with non-reasoning models?**  
-A: Yes, but the `reasoning.delta` SSE events will not be emitted.  Only `message.delta` events will appear.
+**Q: Which field name is used for thinking tokens?**  
+A: `ChatOpenAIReasoner` checks both `reasoning_content` (DeepSeek/QwQ) and `reasoning` (vLLM Gemma-4) and always exposes the value under `additional_kwargs["reasoning_content"]`.
 
 **Q: How do I disable thinking tokens to save tokens/time?**  
-A: Set `lmstudio_reasoning="off"` (LM Studio mode) or `stream_reasoning=False` (OpenAI mode).
+A: Set `stream_reasoning=False`, or pass the appropriate `extra_body` flag to the model (e.g. `{"chat_template_kwargs": {"enable_thinking": False}}`).
