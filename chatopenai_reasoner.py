@@ -51,6 +51,7 @@ from langchain_core.outputs import ChatGenerationChunk, ChatResult
 from langchain_openai import ChatOpenAI
 
 
+
 class ChatOpenAIReasoner(ChatOpenAI):
     """
     Universal ChatOpenAI subclass that surfaces ``reasoning_content`` from
@@ -198,6 +199,29 @@ class ChatOpenAIReasoner(ChatOpenAI):
         **kwargs: Any,
     ) -> ChatResult:
         return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    def with_structured_output(
+        self,
+        schema=None,
+        *,
+        method="function_calling",
+        include_raw: bool = False,
+        strict=None,
+        tools=None,
+        **kwargs,
+    ):
+        """Force function_calling method to avoid passing a BaseModel class to
+        client.create(), which is not supported — client.parse() would be
+        required instead.  Function calling uses tool definitions, so no
+        response_format Pydantic class ends up in the payload."""
+        return super().with_structured_output(
+            schema,
+            method=method,
+            include_raw=include_raw,
+            strict=strict,
+            tools=tools,
+            **kwargs,
+        )
 
     def _create_chat_result(
         self,
